@@ -101,5 +101,127 @@ Without actually going into the details that I need to write this Extension.
 There are [online tutorials](https://www.rubyguides.com/2018/03/write-ruby-c-extension/), which explain how to create Ruby things from C land (like creating a hash, or reading a Ruby `int` to a proper C `int`), but not much else. And tbh, for that functionality, I learned the most by reading mkxp's mri-binding code.
 The best documentatoin I found at the time (There might be newer ones that are good, but I relied on this very heavily) is [this](https://silverhammermba.github.io/emberb/c/) which, among other things, explains how you can actually keep one value in C around in a Ruby obejct, which we need for `struct`s.
 
-So for all the 3 things that `c/discord_game _sdk.h` exposes; `enum`s, `struct`s & functions, `enum`s are the simplest part and just be done in pure Ruby (it's just declaring a bunch of variables), which I did [here](https://github.com/rkevin-arch/ruby_discord_game_sdk/blob/main/lib/ruby_discord_game_sdk/enums.rb).
+So for all the 3 things that `c/discord_game_sdk.h` exposes; `enum`s, `struct`s & functions, `enum`s are the simplest part and just be done in pure Ruby (it's just declaring a bunch of variables), which I did [here](https://github.com/rkevin-arch/ruby_discord_game_sdk/blob/main/lib/ruby_discord_game_sdk/enums.rb).
 The only important thing is making sure the integer values in Ruby match the actual `int`s in the header file, because we're passing in the value from Ruby land directly into the functions.
+
+## Chapter 3: Wrapping a C Struct in Ruby
+
+As for structs, this is likely the most complicated part.
+(ugh, I just realized I made the code much more difficult to understand as a beginner because I use macros everywhere)
+C Macros are a very powerful, but absolutely evil tool and I [rkevin] hate them with every fiber of my being.
+TBH, working on ModShot (the OpenAL stuff) and this are literally the only 2 cases where I think using macros are fin and not just plain evil.
+
+All the macro definitions are in `helpers.h`, which I will not go over and will just post the macro expanded versions of instead so it's easier for me to explain.
+So in `activity.h`, we have the following:
+
+```C
+extern VALUE rb_cDiscordActivity;
+
+DECLARE_DISCORD_TYPE(activity, struct DiscordActivity)
+void rb_discord_init_activity(VALUE module);
+```
+
+which after macro expansion becomes this:
+
+```C
+extern VALUE rb_cDiscordActivity;
+
+size_t rb_discord_activity_dsize(const void* data);
+extern const rb_data_type_t rb_discord_activity_type;
+VALUE rb_discord_activity_alloc(VALUE self);
+ctype* rb_discord_activity_get_struct(VALUE self);
+void rb_discord_activity_set_struct(VALUE self, struct DiscordActivity* data);
+void rb_discord_init_activity(VALUE module);
+```
+
+Again, in the header files, we only have the declarations of what functions there are (and what potential static variables there are), but not the actual definitions themselves. Those are in `activity.c`.
+In there, we first have the actual global variable `VALUE rb_cDiscordActivity` that will be used by the main module (it'll become the `DiscordGameSDK::Activity` class).
+Read the doc I posted before, [specifically this section](https://silverhammermba.github.io/emberb/c/#data), for some info on how we create something in C and keep it alive in Ruby land.
+Basically, we need a `const rb_data_type_t rb_discord_activity_type` object (there's some fancy syntactic sugar here. some weird ruby internal stuff, don't question it) that is used by Ruby to wrap up and arbitrary block of Memory into a Ruby object that you can then access from C land.
+
+- A `rb_discord_activity_alloc` function that allocated the memory for the new object.
+- A `rb_discord_activity_dsize` function to tell Ruby how big our data is (for Ruby internal tracking purposes).
+
+And that's mostly it (I took some shortcuts with memory freeing, will explain in a bit)
+So all of that is wrapped in the `DEFINE_DISCORD_TYPE(activity, struct DiscordActivity)` macro, which expands to the following:
+
+```C
+size_t rb_discord_activity_dsize(const void* data) {
+    return sizeof(struct DiscordActivity);
+}
+
+const rb_data_type_t rb_discord_activity_type = {
+    .wrap_struct_name = "DiscordGameSDK_activity",
+    .function = {
+        .dmark = NULL,
+        .dfree = free,
+        .dsize = rb_discord_activity_dsize,
+    },
+    .data = NULL,
+    .flags = RUBY_TYPED_FREE_IMMEDIATELY,
+};
+
+VALUE rb_discord_activity_alloc(VALUE self) {
+    /* allocate memory for newly created object */
+    struct DiscordActivity* data = malloc(sizeof(struct DiscordActivity));
+    memset(data, 0, sizeof(struct DiscordActivity));
+    return TypedData_Wrap_Struct(self, &rb_discord_activity_type, data);
+}
+
+struct DiscordActivity* rb_discord_activity_get_struct(VALUE self) {
+    /* given a ruby object, return the underlying c struct */
+    ctype* data;
+    TypedData_Get_Struct(self, struct DiscordActivity, &rb_discord_activity_type, data);
+    return data;
+}
+
+void rb_discord_activity_set_struct(VALUE self, ctype* data) {
+    /* given a struct, copy its data into the ruby object */
+    memcpy(rb_discord_activity_get_struct(self), data, sizeof(struct DiscordActivity));
+}
+```
+
+When we're allocating a new object, I use `malloc` to create a block of memory in C that's of size `sizeof(struct DiscordActivity)`, use `memset` to initalize it to all 0s, then use the ruby helper function `TypedData_Wrap_struct` (along with the `rb_discord_activity_type` definition we wrote) to return the Ruby object.
+In the definition of `rb_discord_activity_type`, we set `.function.dfree` to the `free` function, which is a C builtin function to cleanup memory created by `malloc`. It'll be called by Ruby automatically when the object is destroyed, so we don't end up with leaked memory.
+Finally, the `rb_discord_activity_get_struct` and `rb_discord_activity_set_struct` are just helper functions for me to get the underlying `stuct DiscordActivity` from a Ruby object.
+Later in a function called by our module's init function, there are
+
+```C
+void rb_discord_init_activity(VALUE module) {
+    rb_cDiscordActivity = rb_define_class_under(module, "Activity", rb_cObject);
+    rb_define_alloc_func(rb_cDiscordActivity, rb_discord_activity_alloc);
+    ...
+}
+```
+
+So module will be `DiscordGameSDK`, and `rb_cDiscordActivity` is a newly created class under it, so it maps to Ruby's `DiscordGameSDK::Activity`, then we set the `alloc` class to `rb_discord_activity_alloc`. So whenever a new object is created, it calls that alloc func to get it's own chunk of memory carved out for a `struct DiscordActivity`.
+
+After all that, we can finally get to the getters and setters for them.
+I'm just gonna use a sing one as an example - All the diffrent types work slightly differently, but this s already way too long.
+I have a macro `DEFINE_ATTRIBUTE_INT(activity, type)` that creates the C functions for the getters and setters, then later `EXPOSE_ATTRIBUTE(rb_cDiscord_Activity, activity, type)` in `rb_discord_init_activity` to expose those C functions to Ruby land.
+The functions definitions expanded by `DEFINE_ATTRIBUTE_INT(activity, type)` looks like this
+
+```C
+VALUE rb_discord_activity_get_type(VALUE self) {
+    return INT2NUM(rb_discord_activity_get_struct(self)->type);
+}
+VALUE rb_discord_activity_set_type(VALUE self, VALUE val) {
+    rb_discord_activity_get_struct(self)->type = NUM2INT(val);
+    return Qnil;
+}
+```
+
+So y'know, fairly standard stuff that you might see in mkxp. Just some Ruby/C type conversions.
+The part that exposes it on `rb_cDiscordActivity`, the `DiscordGameSDK::Activity` class, is
+
+```C
+EXPOSE_ATTRIBUTE(rb_cDiscordActivity, activity, type), which expands to:
+rb_define_method(rb_cDiscordActivity, "type", rb_discord_activity_get_type, 0);
+rb_define_method(rb_cDiscordActivity, "type=", rb_discord_activity_set_type, 1);
+```
+
+So that's the getters and setters!
+When you try to get `activity.type` in Ruby, it calls `rb_discord_activity_get_type` with 0 arguments, which uses the `rb_discord_activity_get_struct` helper function to get the underlying C struct, access it's type variable, then return it as a Ruby number.
+Other attributes work similarly (with some occasional nuance), like strings having a max length (and having to be `strncpy`'d over), or for things like setting activity.
+`assets_large_image` in Ruby actually sets `activity->assets.large_large` in C.
+(I can technically make them actual nested objects, but that's way to much work)
