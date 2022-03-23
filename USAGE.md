@@ -91,3 +91,15 @@ activityManager->update_activity(activityManager, &activity, dontworryaboutit, d
 (The two `dontworryaboutit` parameters are related to callback functions which I am definitely not going into details about, nor am I gonna explain the nuance with nested structs.)
 
 Ok. Time to actually talk Ruby.
+
+## Chapter 2: Writing a Ruby C Extension
+
+The Ruby C internals are not documented very well, which absolutely sucks. Most of the stuff online are like
+> Haha, Here's a tutorial to write a hello world Ruby extension in C. Don't you feel accomplished? :)
+Without actually going into the details that I need to write this Extension.
+
+There are [online tutorials](https://www.rubyguides.com/2018/03/write-ruby-c-extension/), which explain how to create Ruby things from C land (like creating a hash, or reading a Ruby `int` to a proper C `int`), but not much else. And tbh, for that functionality, I learned the most by reading mkxp's mri-binding code.
+The best documentatoin I found at the time (There might be newer ones that are good, but I relied on this very heavily) is [this](https://silverhammermba.github.io/emberb/c/) which, among other things, explains how you can actually keep one value in C around in a Ruby obejct, which we need for `struct`s.
+
+So for all the 3 things that `c/discord_game _sdk.h` exposes; `enum`s, `struct`s & functions, `enum`s are the simplest part and just be done in pure Ruby (it's just declaring a bunch of variables), which I did [here](https://github.com/rkevin-arch/ruby_discord_game_sdk/blob/main/lib/ruby_discord_game_sdk/enums.rb).
+The only important thing is making sure the integer values in Ruby match the actual `int`s in the header file, because we're passing in the value from Ruby land directly into the functions.
